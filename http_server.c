@@ -4,10 +4,22 @@
 #include <linux/sched/signal.h>
 #include <linux/tcp.h>
 
+#include "fib.h"
 #include "http_parser.h"
 #include "http_server.h"
 
 #define CRLF "\r\n"
+
+#define HTTP_RESPONSE_200_FIB                                  \
+    ""                                                         \
+    "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF      \
+    "Content-Type: text/plain" CRLF "Content-Length: %lu" CRLF \
+    "Connection: Close" CRLF CRLF "%s" CRLF
+#define HTTP_RESPONSE_200_KEEPALIVE_FIB                        \
+    ""                                                         \
+    "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF      \
+    "Content-Type: text/plain" CRLF "Content-Length: %lu" CRLF \
+    "Connection: Keep-Alive" CRLF CRLF "%s" CRLF
 
 #define HTTP_RESPONSE_200_DUMMY                               \
     ""                                                        \
@@ -76,13 +88,49 @@ static int http_server_send(struct socket *sock, const char *buf, size_t size)
 static int http_server_response(struct http_request *request, int keep_alive)
 {
     char *response;
+    char resp_fib[256];
+    int fib = 0;
+    u32 order = 0;
+    bigN bign;
 
     pr_info("requested_url = %s\n", request->request_url);
+    fib = !strncmp("/fib/", request->request_url, 5);
+    if (fib) {
+        kstrtou32(&request->request_url[5], 10, &order);
+        bign = fib_sequence(order);
+
+        int j, got_num = 0;
+        char nums[8 * bigN_num + 1] = {0};
+        char num[9];
+        for (j = bigN_num - 1; j >= 0; j--)
+            if (bign.part[j]) {
+                if (got_num)
+                    snprintf(num, sizeof(num), "%08llu",
+                             (unsigned long long) bign.part[j]);
+                else
+                    snprintf(num, sizeof(num), "%llu",
+                             (unsigned long long) bign.part[j]);
+                got_num = 1;
+                strcat(nums, num);
+            }
+
+        if (keep_alive)
+            snprintf(resp_fib, sizeof(resp_fib),
+                     HTTP_RESPONSE_200_KEEPALIVE_FIB, strlen(nums), nums);
+        else
+            snprintf(resp_fib, sizeof(resp_fib), HTTP_RESPONSE_200_FIB,
+                     strlen(nums), nums);
+    }
+
     if (request->method != HTTP_GET)
         response = keep_alive ? HTTP_RESPONSE_501_KEEPALIVE : HTTP_RESPONSE_501;
-    else
-        response = keep_alive ? HTTP_RESPONSE_200_KEEPALIVE_DUMMY
-                              : HTTP_RESPONSE_200_DUMMY;
+    else {
+        if (fib)
+            response = resp_fib;
+        else
+            response = keep_alive ? HTTP_RESPONSE_200_KEEPALIVE_DUMMY
+                                  : HTTP_RESPONSE_200_DUMMY;
+    }
     http_server_send(request->socket, response, strlen(response));
     return 0;
 }
